@@ -3,8 +3,10 @@ from distributions import normal_distribution
 import networksim
 from voting_strategy import vote
 
-NUM_VALIDATORS = 20
+NUM_VALIDATORS = 13
 BLKTIME = 100
+BY_CHAIN = False
+NETSPLITS = False
 
 logging_level = 0
 
@@ -25,17 +27,19 @@ class Signature():
         # of this signature
         self.last_finalized = last_finalized
         # Hash of the signature (for db storage purposes)
-        self.hash = random.randrange(10**14) + 10**14 * self.height
+        self.hash = random.randrange(10**14) + 10**15 + 10**17 * self.height
 
 
 class Block():
-    def __init__(self, maker, height):
+    def __init__(self, maker, height, parent):
         # The producer of the block
         self.maker = maker
         # The height of the block
         self.height = height
         # Hash of the signature (for db storage purposes)
-        self.hash = random.randrange(10**20) + 10**20 * self.height
+        self.hash = random.randrange(10**20) + 10**21 + 10**23 * self.height
+        # Parent of the block
+        self.parent = None if parent is None else parent.hash
 
 
 # An object containing the hash of a block and the hash of a previous
@@ -102,6 +106,7 @@ class Validator():
         self.pos = self.id = pos
         # Heights that this validator has already signed
         self.signed_heights = {}
+        self.min_unsigned_height = 1
         # This validator's offset from the clock
         self.time_offset = max(normal_distribution(200, 100)(), 0)
         # The highest height that this validator has seen
@@ -117,34 +122,56 @@ class Validator():
         self.max_finalized_height = 0
         # The network object
         self.network = network
+        # My default judgements on blocks
+        self.default_judgements = {}
+        # Recent requests for objects
+        self.recent_requests = {}
+        # Last time signed
+        self.last_time_signed = 0
 
-    def sign(self, block):
+    def judge(self, block):
         # Calculate this validator's (randomly offset) view of the current time
         mytime = now[0] + self.time_offset
         offset = (mytime - (block.maker * BLKTIME)) % (BLKTIME * NUM_VALIDATORS)
-        # Iniitalize the probability array, the core of the signature
-        probs = []
         # Compute the validator's opinion of the latest block, based on whether
         # or not it arrived at the correct time
-        if offset < BLKTIME:
-            probs.append({block.hash: 0.67 + random.random() * 0.05})
+        my_opinion = 1 / (1.5 + offset / BLKTIME)
+        if block.height not in self.default_judgements:
+            self.default_judgements[block.height] = {}
+        already_allocated = sum(self.default_judgements[block.height].values())
+        self.default_judgements[block.height][block.hash] = \
+            my_opinion * (1 - already_allocated)
+
+    def sign(self, block):
+        # Iniitalize the probability array, the core of the signature
+        probs = []
+        if block is not None:
+            probs.append({block.hash: self.default_judgements[block.height][block.hash]})
+	    probs.extend(self.compute_view(block.height))
+            h = block.height
         else:
-            probs.append({block.hash: 0.33 - random.random() * 0.05})
+            probs.extend(self.compute_view(self.max_height + 1))
+            h = self.max_height + 1
         # Compute the validator's current view of previous blocks up to the
         # point of finalization
-        probs.extend(self.compute_view(block.height))
+        log('Making signature: %r %r' % (self.max_height, self.min_unsigned_height), lvl=1)
         if self.pos == 0:
             for i, v in enumerate(probs):
-                log('Signatures for block %d: %r' % (block.height - i, v), lvl=1)
+                log('Signatures for block %d: %r %r' % (block.height - i, v, {k: who_heard_of(k, self.network) for k,w in v.items()}), lvl=1)
         # Add the end of the node's finalized hash chain to the signature, and
         # create the signature
-        pre_probs_h = block.height - len(probs)
-        o = Signature(self.pos, probs, block.height, self.finalized_hashes[pre_probs_h])
+        pre_probs_h = h - len(probs)
+        print h, len(probs), pre_probs_h, self.finalized_hashes
+        o = Signature(self.pos, probs, h, self.finalized_hashes[pre_probs_h])
+        x = self.finalized_hashes[pre_probs_h].blockhash
+        if x is not None:
+            assert self.received_objects[x].height <= len(self.finalized_hashes) + 1, (self.received_objects[x].height, len(self.finalized_hashes) + 1)
         # Sanity check
         if o.last_finalized.blockhash is not None:
-            assert o.last_finalized.blockhash // 10**20 == block.height - len(probs)
+            assert o.last_finalized.blockhash // 10**23 == h - len(probs)
         # Append the signature to the node's list of signatures produced and return it
         signatures.append(o)
+        self.received_objects[o.hash] = o
         return o
 
     def compute_view(self, from_height):
@@ -160,8 +187,8 @@ class Validator():
             return []
         # For every height between the node's current maximum seen height and
         # its last known finalized height...
-        probs = []
-        for i in xrange(1, from_height - self.max_finalized_height):
+        probs = [None] * (from_height - self.max_finalized_height - 1)
+        for i in range(1, from_height - self.max_finalized_height)[::-1]:
             block_scores = {}
             if from_height - i not in self.heights:
                 self.heights[from_height - i] = {"blocks": {}, "signatures": {}}
@@ -177,7 +204,7 @@ class Validator():
                 # every block at the height
                 elif len(sig.probs) > i-q:
                     for blockhash, prob in sig.probs[i-q].items():
-                        assert blockhash // 10**20 == from_height - q - (i-q)
+                        assert blockhash // 10**23 == from_height - q - (i-q)
                         if blockhash not in block_scores:
                             block_scores[blockhash] = []
                         block_scores[blockhash].append(prob)
@@ -187,7 +214,7 @@ class Validator():
                 # the chain and add such an attestation to our list of votes
                 else:
                     h = sig.last_finalized
-                    assert h.blockhash // 10**20 == from_height - q - len(sig.probs)
+                    assert h.blockhash // 10**23 == from_height - q - len(sig.probs)
                     success = True
                     for _ in range(i-q - len(sig.probs)):
                         if h.prev not in self.received_objects:
@@ -195,29 +222,47 @@ class Validator():
                             break
                         h = self.received_objects[h.prev]
                     if success and h.blockhash is not None:
-                        assert h.blockhash // 10**20 == from_height - i, (h.blockhash, from_height - i)
+                        assert h.blockhash // 10**23 == from_height - i, (h.blockhash, from_height - i)
                         if h.blockhash not in block_scores:
                             block_scores[h.blockhash] = []
                         block_scores[h.blockhash].append(0.999999)
                         if i-q-len(sig.probs) > 0:
                             log('Decoding hash succeeded', lvl=3)
-                    else:
-                        log('Decoding hash failed', lvl=3)
+                    elif h.prev not in self.recent_requests or self.recent_requests[h] < self.network.time + 200:
+                        log('Decoding hash failed: %r %r %r %r' % (h.prev, self.max_finalized_height, who_heard_of(h.prev, self.network), get_finalization_heights(self.network)), lvl=1)
+                        self.recent_requests[h] = self.network.time
+                        self.network.broadcast(self, ObjRequest(self, h.prev))
                         self.network.broadcast(self, SyncRequest(self))
             # Use the array of previous votes that we have collected, and
             # compute from that our own vote for every block
-            probs.append(vote(block_scores, self.received_objects, NUM_VALIDATORS))
+            probs[i-1] = vote(block_scores, self.default_judgements.get(from_height - i, {}), NUM_VALIDATORS)
+            if BY_CHAIN:
+                for b in probs[i-1].keys():
+                    parent = self.received_objects[b].parent
+                    if parent is not None:
+                        if parent not in self.received_objects:
+                            log('t1 elision: %d %r' % (b, parent), lvl=4)
+                            probs[i-1][b] = 0
+                        elif i-1 == len(probs) - 1 and parent != sig.last_finalized.blockhash:
+                            log('t2 elision: %d %r %r' % (b, parent, sig.last_finalized.blockhash), lvl=4)
+                            probs[i-1][b] = 0
+                        elif i-1 < len(probs) - 1 and parent not in probs[i]:
+                            log('t3 elision: %d %r' % (b, parent), lvl=4)
+                            probs[i-1][b] = 0
+                        elif i-1 < len(probs) - 1:
+                            probs[i-1][b] *= probs[i][parent]
             for b in block_scores:
                 if b not in self.received_objects:
                     self.network.broadcast(self, ObjRequest(self, b))
+                    log('requesting: %d' % b, lvl=1)
             # Log a single node's viewpoint changing over time
             if self.pos == 0:
                 log('%d %r' % (from_height - i, self.heights[from_height - i]["blocks"].keys()), lvl=2)
                 log(block_scores, lvl=2)
-                log(probs[-1], lvl=2)
+                log(probs[i-1], lvl=2)
             # See if our vote corresponds to finality anywhere
-            for blockhash, p in probs[-1].items():
-                assert blockhash // 10**20 == from_height - i
+            for blockhash, p in probs[i-1].items():
+                assert blockhash // 10**23 == from_height - i
                 # 0.9999 = finality threshold
                 if p > 0.9999:
                     while len(self.finalized) <= from_height - i:
@@ -242,7 +287,7 @@ class Validator():
         # Sanity check
         for j, p in enumerate(probs):
             for h, sig in p.items():
-                assert h // 10**20 == from_height - j - 1, (probs, from_height, block_scores)
+                assert h // 10**23 == from_height - j - 1, (probs, from_height, block_scores)
         log('Probabilities: %r' % probs, lvl=4)
         return probs
 
@@ -255,10 +300,14 @@ class Validator():
             log('received block: %d %d' % (obj.height, obj.hash), lvl=2)
             if obj.height > self.max_finalized_height + 40:
                 self.network.broadcast(self, SyncRequest(self))
+            # Form a default judgement of how good this block is
+            self.judge(obj)
             # If we have not yet produced a signature at this height, do so now
-            if obj.height not in self.signed_heights:
+            if obj.height not in self.signed_heights and not BY_CHAIN:
                 s = self.sign(obj)
                 self.signed_heights[obj.height] = True
+                while self.min_unsigned_height in self.signed_heights:
+                    self.min_unsigned_height += 1
                 self.on_receive(s)
                 self.network.broadcast(self, s)
             if obj.height not in self.heights:
@@ -311,6 +360,7 @@ class Validator():
                         self.heights[b.height] = {"signatures": {}, "blocks": {}}
                     self.heights[b.height]["blocks"][b.hash] = b
                     self.received_objects[b.hash] = b
+                    self.judge(b)
                 self.compute_view(self.max_height)
                 log('And now they are %d and %d' %
                     (self.max_finalized_height, self.max_height), lvl=2)
@@ -328,10 +378,34 @@ class Validator():
     def tick(self):
         mytime = self.network.time + self.time_offset
         offset = (mytime - (self.pos * BLKTIME)) % (BLKTIME * NUM_VALIDATORS)
+        if BY_CHAIN:
+            if self.network.time > self.last_time_signed + 50:
+                s = self.sign(self.head)
+                self.on_receive(s)
+                self.network.broadcast(self, s)
+                self.last_time_signed = self.network.time
         if offset < BLKTIME and self.last_time_made_block < mytime - (BLKTIME * NUM_VALIDATORS / 2):
             self.last_time_made_block = mytime
-            o = Block(self.pos, self.max_height + 1)
-            log('making block: %d %d' % (o.height, o.hash), lvl=1)
+            if BY_CHAIN:
+                v = [{}] + self.compute_view(self.max_height + 1)
+                maxscore, bestblock = 0, None
+                for i in range(1, len(v)):
+                    for h, s in v[i].items():
+                        parentscore = 0
+                        for h1, s1 in v[i-1].items():
+                            if self.received_objects[h1].parent == h:
+                                parentscore += s1
+                        score = s * (1 - parentscore)
+                        if score > maxscore:
+                            maxscore, bestblock = score, h
+                if bestblock is not None:
+                    b = self.received_objects[bestblock]
+                    o = Block(self.pos, b.height + 1, b)
+                else:
+                    o = Block(self.pos, 1, None)
+            else:
+                o = Block(self.pos, self.max_height + 1, self.head)
+            log('making block: %d %d parent %r' % (o.height, o.hash, o.parent), lvl=1)
             self.network.broadcast(self, o)
             self.received_objects[o.hash] = o
             return o
@@ -342,6 +416,20 @@ discarded = {}
 finalized_blocks = {}
 signatures = []
 now = [0]
+
+
+
+def who_heard_of(h, n):
+   o = ''
+   for x in n.agents:
+       o += '1' if h in x.received_objects else '0'
+   return o
+
+def get_finalization_heights(n):
+   o = []
+   for x in n.agents:
+       o.append(x.max_finalized_height)
+   return o
 
 
 # Check how often blocks that are assigned particular probabilities of
@@ -389,21 +477,24 @@ def run(steps=4000):
             finalized = sorted(finalized, key=lambda x: len(x[1]))
             for j in range(len(n.agents) - 1):
                 for k in range(len(finalized[j][1])):
-                    assert finalized[j][1][k] is None or finalized[j+1][1][k] is \
-                        None or finalized[j][1][k] == finalized[j+1][1][k], (finalized, j)
+                    if finalized[j][1][k] is not None and finalized[j+1][1][k] is not None:
+                        if finalized[j][1][k] != finalized[j+1][1][k]:
+                            print finalized[j]
+                            print finalized[j+1]
+                            raise Exception("Finalization mismatch: %r %r" % (finalized[j][1][k], finalized[j+1][1][k]))
             print 'Finalized status: %r' % [x[1][x[0]] for x in finalized]
-        if i == 10000:
+        if i == 10000 and NETSPLITS:
             print "###########################################################"
             print "Knocking off 20% of the network!!!!!"
             print "###########################################################"
             n.knock_offline_random(NUM_VALIDATORS // 5)
-        if i == 20000:
+        if i == 20000 and NETSPLITS:
             print "###########################################################"
             print "Simluating a netsplit!!!!!"
             print "###########################################################"
             n.generate_peers()
             n.partition()
-        if i == 30000:
+        if i == 30000 and NETSPLITS:
             print "###########################################################"
             print "Network health back to normal!"
             print "###########################################################"

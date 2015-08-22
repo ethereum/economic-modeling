@@ -3,8 +3,8 @@ import random, sys
 
 def normal_distribution(mean, standev):
     def f():
-        total = sum([random.choice([1, -1]) for i in range(529)])
-        return int(total * (standev / 23.0) + mean)
+        total = sum([random.choice([1, -1]) for i in range(64)])
+        return int(total * (standev / 8.0) + mean)
 
     return f
 
