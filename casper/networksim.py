@@ -4,9 +4,9 @@ import random
 
 class NetworkSimulator():
 
-    def __init__(self):
+    def __init__(self, latency=50):
         self.agents = []
-        self.latency_distribution_sample = transform(normal_distribution(50, 20), lambda x: max(x, 0))
+        self.latency_distribution_sample = transform(normal_distribution(latency, (latency * 2) // 5), lambda x: max(x, 0))
         self.time = 0
         self.objqueue = {}
         self.peers = {}
