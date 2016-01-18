@@ -40,9 +40,9 @@ def aggressive_vote(probs):
     elif probs[len(probs)*2/3] <= 0.1:
         return FINALITY_THRESHOLD
     if probs[len(probs)/3] >= 0.7:
-        return 0.92
+        return 0.955
     elif probs[len(probs)*2/3] <= 0.3:
-        return 0.08
+        return 0.045
     else:
         return max(0.2, min(0.8, probs[len(probs)/2] * 3 - 0.8 - random.random() * 0.4))
 
