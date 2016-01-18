@@ -1,7 +1,7 @@
 import copy, random, hashlib
 from distributions import normal_distribution
 import networksim
-from voting_strategy import vote, default_vote
+import voting_strategy
 import math
 
 # Number of validators
@@ -15,7 +15,7 @@ BLKTIME = 40
 # plus reconvergence
 NETSPLITS = 0
 # Network latency
-NETWORK_LATENCY = 10
+NETWORK_LATENCY = 100
 # Check the equality of finalized states
 CHECK_INTEGRITY = True
 # The genesis state root
@@ -23,7 +23,9 @@ GENESIS_STATE = 0
 # Broadcast success rate
 BROADCAST_SUCCESS_RATE = 0.9
 # Clock disparity
-CLOCK_DISPARITY = 10
+CLOCK_DISPARITY = 100
+# Finality threshold
+FINALITY_THRESHOLD = 0.000001
 
 logging_level = 0
 
@@ -94,7 +96,7 @@ def state_transition(state, block):
 
 # A validator
 class Validator():
-    def __init__(self, pos, network):
+    def __init__(self, pos, network, default_vote=voting_strategy.default_vote, vote=voting_strategy.vote):
         # Map from height to {node_id: latest_bet}
         self.received_signatures = []
         # List of received blocks
@@ -125,8 +127,11 @@ class Validator():
         self.next_height = self.pos
         # Own most recent signature
         self.most_recent_sig = None
-        # Most recent signatures of other
+        # Most recent signatures of other validators
         self.most_recent_sigs = {}
+        # Voting methods
+        self.vote = vote
+        self.default_vote = default_vote
 
     # Get the local time from the point of view of this validator, using the
     # validator's offset from real time
@@ -151,31 +156,31 @@ class Validator():
             received_time = self.time_received[b.hash] if b is not None else None
             # if received_time:
             #     print 'delta', received_time - BLKTIME * i
-            my_opinion = default_vote(BLKTIME * i, received_time, self.get_time(), blktime=BLKTIME)
+            my_opinion = self.default_vote(BLKTIME * i, received_time, self.get_time(), blktime=BLKTIME)
             # Get others' bets on this height
             votes = self.received_signatures[i].values() if i < len(self.received_signatures) else []
             votes = [x for x in votes if x != 0]
             # Fill in the not-yet-received votes with this validator's default bet
             votes += [my_opinion] * (NUM_VALIDATORS - len(votes))
-            vote_from_signatures = int(vote(votes))
+            vote_from_signatures = self.vote(votes)
             # If you have not received a block, reserve judgement
-            bg = min(vote_from_signatures, 10 if self.received_blocks[i] is not None else my_opinion)
+            bg = min(vote_from_signatures, 1 if self.received_blocks[i] is not None else my_opinion)
             # Add the bet to the list
             best_guesses[i] = bg
             # Request a block if we should have it, and should have had it for
             # a long time, but don't
-            if vote_from_signatures > 3 and self.received_blocks[i] is None:
+            if vote_from_signatures > 0.9 and self.received_blocks[i] is None:
                 self.broadcast(BlockRequest(self.id, i))
             elif i < len(self.received_blocks) - 50 and self.received_blocks[i] is None:
                 if random.random() < 0.05:
                     self.broadcast(BlockRequest(self.id, i))
             # Block finalized
-            if best_guesses[i] >= 10:
+            if best_guesses[i] >= 1 - FINALITY_THRESHOLD:
                 while len(self.finalized_hashes) <= i:
                     self.finalized_hashes.append(None)
                 self.finalized_hashes[i] = self.received_blocks[i].hash
             # Absense of the block finalized
-            elif best_guesses[i] <= -10:
+            elif best_guesses[i] <= FINALITY_THRESHOLD:
                 while len(self.finalized_hashes) <= i:
                     self.finalized_hashes.append(None)
                 self.finalized_hashes[i] = False
@@ -188,14 +193,6 @@ class Validator():
             self.states[self.max_finalized_height] = state_transition(last_state, self.received_blocks[self.max_finalized_height])
         self.probs = self.probs[:sign_from] + best_guesses[sign_from:]
         new_states = [self.states[self.max_finalized_height] if self.max_finalized_height >= 0 else GENESIS_STATE]
-        prob = 1
-        for h in range(self.max_finalized_height + 1, len(self.received_blocks)):
-            if self.probs[sign_from] > 0:
-                new_states.append(state_transition(new_states[-1], self.received_blocks[h]))
-                prob *= 1 / (1 + 0.5 ** self.probs[sign_from])
-            else:
-                new_states.append(state_transition(new_states[-1], None))
-                prob *= 1 / (1 + 2.0 ** self.probs[sign_from])
         diff_index = 0
         for i in range(-1, -min(len(new_states), len(self.states))-1, -1):
             if new_states[i] != self.states[i]:
@@ -203,9 +200,9 @@ class Validator():
                 diff_index = i
         log('Making signature: %r' % self.probs[-10:], lvl=1)
         sign_from_state = self.states[sign_from - 1] if sign_from > 0 else GENESIS_STATE
-        s = Signature(self.pos, self.probs[sign_from:], self.states[diff_index:], len(self.received_blocks), self.most_recent_sig)
+        s = Signature(self.pos, map(lambda x: min(1 - FINALITY_THRESHOLD, max(FINALITY_THRESHOLD, x)), self.probs[sign_from:]), self.states[diff_index:], len(self.received_blocks), self.most_recent_sig)
         self.most_recent_sig = s
-        all_signatures.append(s)
+        all_signatures.append((s, self.get_time()))
         return s
 
     def on_receive(self, obj):
@@ -236,10 +233,11 @@ class Validator():
             latest_sig_seq = (smrs[obj.signer].seq if obj.signer in smrs else -1)
             # print 'sig', obj.hash, obj.prev, (smrs[obj.signer].hash if obj.signer in smrs else None) == obj.prev
             if latest_sig_hash == obj.prev:
-                while len(self.received_signatures) <= len(obj.probs) + obj.sign_from:
+                sf = obj.sign_from
+                while len(self.received_signatures) <= len(obj.probs) + sf:
                     self.received_signatures.append({})
                 for i, p in enumerate(obj.probs):
-                    self.received_signatures[i + obj.sign_from][obj.signer] = p
+                    self.received_signatures[i + sf][obj.signer] = p
                 self.network.broadcast(self, obj)
                 self.most_recent_sigs[obj.signer] = obj
                 log('upgraded signature: '+str(obj.seq), lvl=2)
@@ -312,12 +310,14 @@ def get_opinions(n):
         for x in n.agents:
             if len(x.probs) <= h:
                 p += '_'
-            elif x.probs[h] <= -10:
-                p += '-'
-            elif x.probs[h] >= 10:
-                p += '+'
             else:
-                p += str(x.probs[h])+','
+                odds = math.log(x.probs[h] / (1 - x.probs[h])) / math.log(FINALITY_THRESHOLD) * 10
+                if odds <= -10:
+                    p += '-'
+                elif odds >= 10:
+                    p += '+'
+                else:
+                    p += str(int(odds * 10) * 0.1)+','
             q += 'n' if len(x.received_blocks) <= h or x.received_blocks[h] is None else 'y'
         o.append((h, p, q))
     return o
@@ -333,15 +333,17 @@ def get_finalization_heights(n):
 # Check how often blocks that are assigned particular probabilities of
 # finalization by our algorithm are actually finalized
 def calibrate(finalized_hashes):
-    thresholds = range(-10, 11)
+    threshold_odds = [FINALITY_THRESHOLD ** (x * 0.1) for x in range(-10, 11)]
+    thresholds = [x / (1 + x) for x in threshold_odds]
     signed = [0] * (len(thresholds) - 1)
     _finalized = [0] * (len(thresholds) - 1)
     _discarded = [0] * (len(thresholds) - 1)
-    for s in all_signatures:
+    for s, _ in all_signatures:
+        sf = s.sign_from
         for i, prob in enumerate(s.probs):
-            if i + s.sign_from >= len(finalized_hashes):
+            if i + sf >= len(finalized_hashes):
                 continue
-            actual_result = 1 if finalized_hashes[i + s.sign_from] else 0
+            actual_result = 1 if finalized_hashes[i + sf] else 0
             index = 0
             while index + 2 < len(thresholds) and prob > thresholds[index + 1]:
                 index += 1
@@ -356,10 +358,53 @@ def calibrate(finalized_hashes):
     print 'Percentage of block heights filled: %f%%' % (len([x for x in finalized_hashes if x]) * 100.0 / len(finalized_hashes))
 
 
+def calc_rewards(finalized_hashes):
+    most_recent = {}
+    gains = {}
+    losses = {}
+    total_gains = {}
+    total_losses = {}
+    for s, t in all_signatures:
+        if s.max_height >= len(finalized_hashes):
+            continue
+        prevsig, prevtime = most_recent.get(s.signer, (None, 0))
+        td = t - prevtime
+        if prevsig:
+            sf = s.sign_from
+            for i, p in enumerate(s.probs):
+                h = sf + i
+                oddspos, oddsneg = p / (1 - p), (1 - p) / p
+                if h < len(finalized_hashes):
+                    if finalized_hashes[h] is False:
+                        score_delta = oddsneg - oddspos * oddspos
+                    else:
+                        score_delta = oddspos - oddsneg * oddsneg
+                    if score_delta >= 0:
+                        gains[s.signer][h] = (gains[s.signer][h-1] if h else 0) + score_delta
+                        losses[s.signer][h] = (losses[s.signer][h-1] if h else 0)
+                    else:
+                        if (p < 0.1 or p > 0.9) and s.signer:
+                            print s.signer, finalized_hashes[h] is not False, oddspos, oddsneg, score_delta
+                        gains[s.signer][h] = (gains[s.signer][h-1] if h else 0)
+                        losses[s.signer][h] = (losses[s.signer][h-1] if h else 0) - score_delta
+            # print 'Validator %d, total gains: %d total losses %d' % (s.signer, gains[h] - (gains[h-200] if h > 200 else 0), losses[h] - (losses[h-200] if h > 200 else 0))
+            total_gains[s.signer] += gains[s.signer][h] - (gains[s.signer][h-200] if h > 200 else 0)
+            total_losses[s.signer] += losses[s.signer][h] - (losses[s.signer][h-200] if h > 200 else 0)
+        else:
+            gains[s.signer], losses[s.signer] = [0] * 10000, [0] * 10000
+            total_gains[s.signer], total_losses[s.signer] = 0, 0
+        most_recent[s.signer] = s, t
+    return total_gains, total_losses
+
 def run(steps=4000):
     n = networksim.NetworkSimulator(latency=NETWORK_LATENCY)
     for i in range(NUM_VALIDATORS):
-        n.agents.append(Validator(i, n))
+        if i == 0:
+            n.agents.append(Validator(i, n, vote=voting_strategy.craycray_vote))
+        elif i % 2:
+            n.agents.append(Validator(i, n, vote=voting_strategy.aggressive_vote))
+        else:
+            n.agents.append(Validator(i, n))
     n.generate_peers(3)
     while len(all_signatures):
         all_signatures.pop()
@@ -390,7 +435,7 @@ def run(steps=4000):
             _all = finalized0[0][1]
             _pos = len([x for x in _all if x])
             _neg = len([x for x in _all if not x])
-            print 'Finalized blocks: %r (%r positive, %r negaitve)' % (len(_all), _pos, _neg)
+            print 'Finalized blocks: %r (%r positive, %r negative)' % (len(_all), _pos, _neg)
         if i == 10000 and NETSPLITS >= 1:
             print "###########################################################"
             print "Knocking off 20% of the network!!!!!"
@@ -408,3 +453,6 @@ def run(steps=4000):
             print "###########################################################"
             n.generate_peers()
     calibrate(n.agents[0].finalized_hashes[:n.agents[0].max_finalized_height + 1])
+    gains, losses = calc_rewards(n.agents[0].finalized_hashes[:n.agents[0].max_finalized_height + 1])
+    for (k, g), (_, l) in zip(gains.items(), losses.items()):
+        print 'Agent %d got a total reward of %d with %d gains and %d losses' % (k, g - l, g, l)
