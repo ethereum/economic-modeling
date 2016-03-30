@@ -1,9 +1,9 @@
 import random
 GENESIS = 0
-LATENCY = 25
-CLOCKOFFSET = 25
-BLKTIME = 10
-RUNTIME = 1000
+LATENCY = 10
+CLOCKOFFSET = 10
+BLKTIME = 4
+RUNTIME = 2000
 MINERS = 10
 
 time = [0]
@@ -40,7 +40,7 @@ class Miner():
         self.time_offset = random.randrange(CLOCKOFFSET) - CLOCKOFFSET // 2
 
     def get_time(self):
-        return time[0] + self.time_offset
+        return max(time[0] + self.time_offset, 0)
 
     def mine(self):
         t = self.get_time()
