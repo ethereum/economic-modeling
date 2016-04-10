@@ -6,6 +6,8 @@ def test_strat(strat, hashpower, gamma, reward, fees):
     them_reward = 0
     me_blocks = 0
     them_blocks = 0
+    me_lost = 0
+    them_lost = 0
     time_elapsed = 0
     for i in range(25000):
         if random.random() < hashpower:
@@ -16,12 +18,14 @@ def test_strat(strat, hashpower, gamma, reward, fees):
         if me_blocks >= len(strat) or them_blocks >= len(strat[me_blocks]) or strat[me_blocks][them_blocks] == 1:
             if me_blocks > them_blocks or (me_blocks == them_blocks and random.random() < gamma):
                 me_reward += me_blocks * reward + time_elapsed * fees
+                them_lost += them_blocks * reward + time_elapsed * fees
             else:
+                me_lost += me_blocks * reward + time_elapsed * fees
                 them_reward += them_blocks * reward + time_elapsed * fees
             me_blocks = 0
             them_blocks = 0
             time_elapsed = 0
-    return me_reward, them_reward
+    return me_reward, them_reward, me_lost, them_lost
 
 def gen_selfish_mining_strat():
     o = [([0] * 20) for i in range(20)]
@@ -42,5 +46,5 @@ if len(sys.argv) < 3:
     sys.exit()
 
 for i in range(1, 50):
-    x, y = test_strat(s, i * 0.01, 0, int(sys.argv[1]), int(sys.argv[2]))
+    x, y, z, w = test_strat(s, i * 0.01, 0, int(sys.argv[1]), int(sys.argv[2]))
     print '%d%% hashpower, %f%% of rewards' % (i, x * 100.0 / (x + y))
