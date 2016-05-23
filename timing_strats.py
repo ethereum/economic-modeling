@@ -179,7 +179,7 @@ latency_sample = sum([latency() for i in range(100)]) // 100
 
 # Define the strategies of the validators
 strategy_groups = [
-    #((time before publishing a block, time per skip to wait before accepting a block, time per skip to wait before publishing), number of validators with this strategy)
+    #((time before publishing a block, time per skip to wait before producing a block, time per skip to wait before accepting), number of validators with this strategy)
     ((20, BLKTIME, BLKTIME), 32),
     ((20, int(BLKTIME * 0.67), BLKTIME), 3),
     ((20, int(BLKTIME * 1.33), BLKTIME), 3),
