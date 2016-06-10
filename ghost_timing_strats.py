@@ -4,7 +4,9 @@ import sys
 # Clock offset
 CLOCKOFFSET = 1
 # Block time
-BLKTIME = 40
+BLKTIME = 15
+# Skip time
+SKIPTIME = 45
 # Round run time
 ROUND_RUNTIME = 500000
 # Number of rounds
@@ -19,7 +21,7 @@ get_txreward = lambda ticks: 0.0001 * ticks
 latency_sample = lambda L: int((random.expovariate(1) * ((L/1.33)**0.75))**1.33)
 # latency = lambda: random.randrange(15) if random.randrange(10) else 47
 # Offline rate
-OFFLINE_RATE = 0.03
+OFFLINE_RATE = 0.00
 
 BLANK_STATE = {'transactions': 0}
 
@@ -86,12 +88,14 @@ def get_state(s, k):
 class Validator():
     def __init__(self, strategy, latency=5):
         # The block that the validator considers to be the head
-        self.head = GENESIS
+        self.main_chain = [GENESIS.hash]
         # A map of tick -> blocks that the validator will receive
         # during that tick
         self.listen_queue = {}
         # Blocks that the validator knows about
         self.blocks = {GENESIS.hash: GENESIS}
+        # Parent -> children map
+        self.children = {}
         # Scores (~= total subtree weight) for those blocks
         self.scores = {GENESIS.hash: 0}
         # When the validator received each block
@@ -106,9 +110,6 @@ class Validator():
         self.time_offset = random.randrange(CLOCKOFFSET) - CLOCKOFFSET // 2
         # Set the validator's strategy
         self.set_strategy(strategy)
-        # Keeps track of the highest block number a validator has already
-        # produced a block at
-        self.min_number = 0
         # The validator's ID
         self.id = None
         # Blocks created
@@ -118,20 +119,26 @@ class Validator():
         # The simulation that this validator is in
         self.simulation = None
         # Maximum number of skips to try
-        self.max_skips = 8
+        self.max_skips = 22
         # Network latency
         self.latency = latency
+        # Parents on top of which we have already created a block
+        self.used_parents = {}
+        # Possible blocks to build on top of
+        self.heads = [GENESIS]
 
     def set_strategy(self, strategy):
         # The number of ticks a validator waits before producing a block
-        self.produce_delay = strategy[0]
+        self.non_skip_produce_delay = strategy[0]
+        # The number of ticks a validator waits before accepting a block
+        self.non_skip_accept_delay = strategy[1]
         # The number of extra ticks a validator waits per skip (ie.
         # if you skip two validator slots then wait this number of ticks
         # times two) before producing a block
-        self.per_block_produce_delay = strategy[1]
+        self.with_skip_produce_delay = strategy[2]
         # The number of extra ticks a validator waits per skip before
         # accpeint a block
-        self.per_block_accept_delay = strategy[2]
+        self.with_skip_accept_delay = strategy[3]
         
 
     # Get the time from the validator's point of view
@@ -144,42 +151,49 @@ class Validator():
             self.listen_queue[time] = []
         self.listen_queue[time].append(obj)
 
-    def earliest_block_time(self, parent, skips):
-        return 20 + parent.number * 20 + skips * 40
+    def earliest_produce_time(self, parent, skips):
+        return BLKTIME + (self.non_skip_produce_delay if not skips else 0) + \
+            parent.number * BLKTIME + (parent.totskips + skips) * SKIPTIME + \
+            (skips if self.with_skip_produce_delay else 0)
+
+    def earliest_accept_time(self, parent, skips):
+        return BLKTIME + (self.non_skip_accept_delay if not skips else 0) + \
+            parent.number * BLKTIME + (parent.totskips + skips) * SKIPTIME + \
+            (skips if self.with_skip_accept_delay else 0)
 
     def mine(self):
         # Is it time to produce a block?
         t = self.get_time()
-        skips = 0
-        head = self.head
-        while self.simulation.get_validator(head.randao, skips) != self.id and skips < self.max_skips:
-            skips += 1
-        if skips == self.max_skips:
-            return
-        # If it is...
-        if t >= self.time_received[head.hash] + self.produce_delay + self.per_block_produce_delay * skips \
-                and head.number >= self.min_number:
-            # Can't produce a block at this height anymore
-            self.min_number = head.number + 1 + skips
-            # Small chance to be offline
-            if random.random() < OFFLINE_RATE:
+        for head in self.heads:
+            skips = 0
+            while self.simulation.get_validator(head.randao, skips) != self.id and skips < self.max_skips:
+                skips += 1
+            if skips == self.max_skips:
                 return
-            # Compute my block reward
-            my_reward = BLKREWARD + get_txreward(self.simulation.time - head.state['transactions'])
-            # Claim the reward from the transactions since the parent
-            new_state = update_state(head.state, 'transactions', self.simulation.time)
-            # Apply the block reward
-            new_state = update_state(new_state, self.id, get_state(new_state, self.id) + my_reward)
-            # Create the block
-            b = Block(head, new_state, self.id, number=head.number + 1 + skips, skips=skips)
-            self.created += 1
-            # print '---------> Validator %d makes block with hash %d and parent %d (%d skips) at time %d' % (self.id, b.hash, b.prevhash, skips, self.simulation.time)
-            # Broadcast it
-            for validator in self.simulation.validators:
-                recv_time = self.simulation.time + 1 + latency_sample(self.latency + validator.latency)
-                # print 'broadcasting, delay %d' % (recv_time - t)
-                validator.add_to_listen_queue(recv_time, b)
-
+            # If it is...
+            if t >= self.earliest_produce_time(head, skips) and head.hash not in self.used_parents:
+                # Can't produce a block at this height anymore
+                self.used_parents[head.hash] = True
+                # Small chance to be offline
+                if random.random() < OFFLINE_RATE:
+                    return
+                # Compute my block reward
+                my_reward = BLKREWARD + get_txreward(self.simulation.time - head.state['transactions']) + (BLKREWARD * 0 if skips else 0)
+                # Claim the reward from the transactions since the parent
+                new_state = update_state(head.state, 'transactions', self.simulation.time)
+                # Apply the block reward
+                new_state = update_state(new_state, self.id, get_state(new_state, self.id) + my_reward)
+                # Create the block
+                b = Block(head, new_state, self.id, number=head.number + 1 + skips, skips=skips)
+                self.created += 1
+                # print '---------> Validator %d makes block with hash %d and parent %d (%d skips) at time %d' % (self.id, b.hash, b.prevhash, skips, self.simulation.time)
+                # Broadcast it
+                for validator in self.simulation.validators:
+                    recv_time = self.simulation.time + 1 + latency_sample(self.latency + validator.latency)
+                    # print 'broadcasting, delay %d' % (recv_time - t)
+                    validator.add_to_listen_queue(recv_time, b)
+                return
+    
     # If a validator realizes that it "should" have a block but doesn't,
     # it can use this method to request it from the network
     def request_block(self, hash):
@@ -190,7 +204,6 @@ class Validator():
 
     # Process all blocks that it should receive during the current tick
     def listen(self):
-        head = self.blocks[self.main_chain[-1]]
         if self.simulation.time in self.listen_queue:
             for blk in self.listen_queue[self.simulation.time]:
                 self.accept_block(blk)
@@ -200,7 +213,44 @@ class Validator():
     def get_score_addition(self, blk):
         parent = self.blocks[blk.prevhash]
         skips = blk.number - parent.number - 1
-        return (0 if blk.hash in self.received_too_early else 10**20) + random.randrange(100) - 50
+        return (-1 if blk.hash in self.received_too_early else 1) # + random.randrange(100) - 50
+
+    def process_lchain_scores(self, blk):
+        s = self.get_score_addition(blk)
+        self.scores[blk.hash] = self.scores.get(blk.prevhash, 0) + s
+        if self.scores[blk.hash] == self.scores[self.heads[0].hash] and blk not in self.heads:
+            self.heads.append(blk)
+        elif self.scores[blk.hash] > self.scores[self.heads[0].hash]:
+            self.heads = [blk]
+
+    def process_ghost_scores(self, blk):
+        s = self.get_score_addition(blk)
+        check_block = blk
+        fork_block = None
+        for i in range(self.backtrack):
+            self.scores[check_block.hash] = self.scores.get(check_block.hash, 0) + s
+            if check_block.height == 0:
+                break
+            elif check_block.height >= len(self.main_chain):
+                fork_block = self.blocks[check_block.prevhash]
+            elif check_block.hash != self.main_chain[check_block.height]:
+                fork_block = self.blocks[check_block.prevhash]
+            check_block = self.blocks[check_block.prevhash]
+        # if blk.height - fork_block.height - 1 > 0:
+            # print 'forking back %d blocks' % (blk.height - fork_block.height - 1)
+        while len(self.main_chain) > fork_block.height + 1:
+            self.main_chain.pop()
+        while 1:
+            best_child = None
+            best_score = -1
+            for c in self.children.get(self.main_chain[-1], []):
+                if self.scores[c] > best_score:
+                    best_score = self.scores[c]
+                    best_child = c
+            if best_child is None:
+                break
+            self.main_chain.append(best_child)
+        self.heads = [self.main_chain[-1]]
 
     def accept_block(self, blk):
         t = self.get_time()
@@ -220,7 +270,7 @@ class Validator():
         # Too early? Re-append at earliest allowed time
         parent = self.blocks[blk.prevhash]
         skips = blk.number - parent.number - 1
-        alotted_recv_time = self.time_received[parent.hash] + skips * self.per_block_accept_delay
+        alotted_recv_time = self.earliest_accept_time(parent, skips)
         if t < alotted_recv_time:
             self.received_too_early[blk.hash] = alotted_recv_time - t
             self.add_to_listen_queue((alotted_recv_time - t) * 2 + self.simulation.time, blk)
@@ -230,10 +280,14 @@ class Validator():
         # print 'Validator %d receives block, hash %d, time %d' % (self.id, blk.hash, self.simulation.time)
         self.blocks[blk.hash] = blk
         self.time_received[blk.hash] = t
+        if parent.hash not in self.children:
+            self.children[parent.hash] = []
+        self.children[parent.hash].append(blk.hash)
         if blk.hash in self.orphans:
             del self.orphans[blk.hash]
-        # Process the scoring rule
-        self.head
+        # Process the ghost scoring rule
+        # self.process_ghost_scores(blk)
+        self.process_lchain_scores(blk)
         # print 'post', self.main_chain
         # self.scores[blk.hash] = self.scores[blk.prevhash] + get_score_addition(skips)
         if self.orphans_by_parent.get(blk.hash, []):
@@ -245,30 +299,20 @@ class Validator():
             del self.orphans_by_parent[blk.hash]
 
 
-def simple_test(baseline=[10, 40, 31]):
+def simple_test(baseline=[5, 0, 5, 0]):
     # Define the strategies of the validators
     strategy_groups = [
-        #((time before publishing a block, time per skip to wait before producing a block, time per skip to wait before accepting), latency, number of validators with this strategy)
-        # ((baseline[0], baseline[1], baseline[2]), 12, 4),
-        # ((baseline[0], baseline[1], baseline[2]), 11, 4),
-        # ((baseline[0], baseline[1], baseline[2]), 10, 4),
-        # ((baseline[0], baseline[1], baseline[2]), 9, 4),
-        # ((baseline[0], baseline[1], baseline[2]), 8, 4),
-        # ((baseline[0], baseline[1], baseline[2]), 7, 4),
-        ((baseline[0], baseline[1], baseline[2]), 6, 5),
-        ((baseline[0], baseline[1], baseline[2]), 5, 5),
-        ((baseline[0], baseline[1], baseline[2]), 4, 5),
-        ((baseline[0], baseline[1], baseline[2]), 3, 5),
-        ((baseline[0], baseline[1], baseline[2]), 2, 5),
-        ((baseline[0], baseline[1], baseline[2]), 1, 5),
-        # ((baseline[0], int(baseline[1] * 0.33), baseline[2]), 3, 2),
-        # ((baseline[0], int(baseline[1] * 0.67), baseline[2]), 3, 2),
-        # ((baseline[0], int(baseline[1] * 1.5), baseline[2]), 3, 2),
-        # ((baseline[0], int(baseline[1] * 2), baseline[2]), 3, 2),
-        # ((baseline[0], baseline[1], int(baseline[2] * 0.33)), 3, 2),
-        # ((baseline[0], baseline[1], int(baseline[2] * 0.67)), 3, 2),
-        # ((baseline[0], baseline[1], int(baseline[2] * 1.5)), 3, 2),
-        # ((baseline[0], baseline[1], int(baseline[2] * 2)), 3, 2),
+        # ((nonskip produce, nonskip accept, skip produce, skip accept) delays, network latency, number of nodes)
+        ((baseline[0], baseline[1], baseline[2], baseline[3]), 2, 12),
+        ((baseline[0] - 10, baseline[1], baseline[2], baseline[3]), 2, 3),
+        ((baseline[0] - 5, baseline[1], baseline[2], baseline[3]), 2, 3),
+        ((baseline[0] + 5, baseline[1], baseline[2], baseline[3]), 2, 3),
+        ((baseline[0] + 10, baseline[1], baseline[2], baseline[3]), 2, 3),
+        ((baseline[0], baseline[1] - 10, baseline[2], baseline[3]), 2, 3),
+        ((baseline[0], baseline[1] - 5, baseline[2], baseline[3]), 2, 3),
+        ((baseline[0], baseline[1] + 0, baseline[2], baseline[3]), 2, 3),
+        ((baseline[0], baseline[1] + 5, baseline[2], baseline[3]), 2, 3),
+        ((baseline[0], baseline[1] + 10, baseline[2], baseline[3]), 2, 3),
     ]
     sgstarts = [0]
     
@@ -281,7 +325,7 @@ def simple_test(baseline=[10, 40, 31]):
     Simulation(validators).run(ROUND_RUNTIME)
     
     def report(validators):
-        head = validators[0].blocks[validators[0].main_chain[-1]]
+        head = validators[0].heads[0]
         
         print 'Head block number:', head.number
         print 'Head block height:', head.height
@@ -327,7 +371,7 @@ def evo_test(initial_s=[1, 40, 27]):
                 validators.append(Validator(_s, _l))
 
         Simulation(validators).run(ROUND_RUNTIME)
-        head = validators[0].blocks[validators[0].main_chain[-1]]
+        head = validators[0].head
         base_instate = sum([head.state.get(j, 0) for j in range(1, INITIAL_GROUP)]) * 1.0 / (INITIAL_GROUP - 1)
         base_totcreated = sum([validators[j].created for j in range(1, INITIAL_GROUP)]) * 1.0 / (INITIAL_GROUP - 1)
         base_reward = base_instate * 2 - base_totcreated
