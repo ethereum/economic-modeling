@@ -6,9 +6,9 @@ CLOCKOFFSET = 1
 # Block time
 BLKTIME = 15
 # Skip time
-SKIPTIME = 45
+SKIPTIME = 40
 # Round run time
-ROUND_RUNTIME = 500000
+ROUND_RUNTIME = 2000000
 # Number of rounds
 ROUNDS = 2000
 # Block reward
@@ -16,12 +16,21 @@ BLKREWARD = 1
 # Reward for including x ticks' worth of transactions
 # Linear by default, but sublinear formulas are
 # probably most accurate
-get_txreward = lambda ticks: 0.0001 * ticks
+get_txreward = lambda ticks: 1 * ticks
 # Latency function
 latency_sample = lambda L: int((random.expovariate(1) * ((L/1.33)**0.75))**1.33)
+# latency_sample = lambda L: random.randrange(L * 2)
 # latency = lambda: random.randrange(15) if random.randrange(10) else 47
 # Offline rate
-OFFLINE_RATE = 0.00
+OFFLINE_RATE = 0.05
+# Additional block reward for a skip block
+SKIP_REWARD = 0
+# Score contribution for a too-early block (1, 0 or -1)
+TOO_EARLY_SCORE = 0
+# Using GHOST?
+USING_GHOST = 0
+# Default latency
+DEFAULT_LATENCY = 3
 
 BLANK_STATE = {'transactions': 0}
 
@@ -153,12 +162,12 @@ class Validator():
 
     def earliest_produce_time(self, parent, skips):
         return BLKTIME + (self.non_skip_produce_delay if not skips else 0) + \
-            parent.number * BLKTIME + (parent.totskips + skips) * SKIPTIME + \
+            parent.height * BLKTIME + (parent.totskips + skips) * SKIPTIME + \
             (skips if self.with_skip_produce_delay else 0)
 
     def earliest_accept_time(self, parent, skips):
         return BLKTIME + (self.non_skip_accept_delay if not skips else 0) + \
-            parent.number * BLKTIME + (parent.totskips + skips) * SKIPTIME + \
+            parent.height * BLKTIME + (parent.totskips + skips) * SKIPTIME + \
             (skips if self.with_skip_accept_delay else 0)
 
     def mine(self):
@@ -178,11 +187,16 @@ class Validator():
                 if random.random() < OFFLINE_RATE:
                     return
                 # Compute my block reward
-                my_reward = BLKREWARD + get_txreward(self.simulation.time - head.state['transactions']) + (BLKREWARD * 0 if skips else 0)
+                br_key = 'blockrewards:'+str(self.id)
+                tx_key = 'txfees:'+str(self.id)
+                skip_key = 'skiprewards:'+str(self.id)
                 # Claim the reward from the transactions since the parent
                 new_state = update_state(head.state, 'transactions', self.simulation.time)
-                # Apply the block reward
-                new_state = update_state(new_state, self.id, get_state(new_state, self.id) + my_reward)
+                # Apply the rewards
+                new_state = update_state(new_state, br_key, get_state(new_state, br_key) + 1)
+                new_state = update_state(new_state, skip_key, get_state(new_state, skip_key) + skips)
+                new_state = update_state(new_state, tx_key, get_state(new_state, tx_key) + 
+                                         get_txreward(self.simulation.time - head.state['transactions']))
                 # Create the block
                 b = Block(head, new_state, self.id, number=head.number + 1 + skips, skips=skips)
                 self.created += 1
@@ -213,7 +227,7 @@ class Validator():
     def get_score_addition(self, blk):
         parent = self.blocks[blk.prevhash]
         skips = blk.number - parent.number - 1
-        return (-1 if blk.hash in self.received_too_early else 1) # + random.randrange(100) - 50
+        return (TOO_EARLY_SCORE if blk.hash in self.received_too_early else 1) # + random.randrange(100) - 50
 
     def process_lchain_scores(self, blk):
         s = self.get_score_addition(blk)
@@ -250,7 +264,18 @@ class Validator():
             if best_child is None:
                 break
             self.main_chain.append(best_child)
-        self.heads = [self.main_chain[-1]]
+        if len(self.main_chain) == 1:
+            self.heads = [self.blocks[self.main_chain[0]]]
+        else:
+            self.head_parent = self.main_chain[-2]
+            self.heads = [self.blocks[self.main_chain[-2]]]
+            best_score = 0
+            for c in self.children.get(self.main_chain[-2], []):
+                if self.scores[c] > best_score:
+                    best_score = self.scores[c]
+                    self.heads = [self.blocks[c]]
+                elif self.scores[c] == best_score:
+                    self.heads.append(self.blocks[c])
 
     def accept_block(self, blk):
         t = self.get_time()
@@ -286,8 +311,10 @@ class Validator():
         if blk.hash in self.orphans:
             del self.orphans[blk.hash]
         # Process the ghost scoring rule
-        # self.process_ghost_scores(blk)
-        self.process_lchain_scores(blk)
+        if USING_GHOST:
+            self.process_ghost_scores(blk)
+        else:
+            self.process_lchain_scores(blk)
         # print 'post', self.main_chain
         # self.scores[blk.hash] = self.scores[blk.prevhash] + get_score_addition(skips)
         if self.orphans_by_parent.get(blk.hash, []):
@@ -299,20 +326,21 @@ class Validator():
             del self.orphans_by_parent[blk.hash]
 
 
-def simple_test(baseline=[5, 0, 5, 0]):
+def simple_test(baseline=[2, 0, 2, 0]):
     # Define the strategies of the validators
     strategy_groups = [
         # ((nonskip produce, nonskip accept, skip produce, skip accept) delays, network latency, number of nodes)
-        ((baseline[0], baseline[1], baseline[2], baseline[3]), 2, 12),
-        ((baseline[0] - 10, baseline[1], baseline[2], baseline[3]), 2, 3),
-        ((baseline[0] - 5, baseline[1], baseline[2], baseline[3]), 2, 3),
-        ((baseline[0] + 5, baseline[1], baseline[2], baseline[3]), 2, 3),
-        ((baseline[0] + 10, baseline[1], baseline[2], baseline[3]), 2, 3),
-        ((baseline[0], baseline[1] - 10, baseline[2], baseline[3]), 2, 3),
-        ((baseline[0], baseline[1] - 5, baseline[2], baseline[3]), 2, 3),
-        ((baseline[0], baseline[1] + 0, baseline[2], baseline[3]), 2, 3),
-        ((baseline[0], baseline[1] + 5, baseline[2], baseline[3]), 2, 3),
-        ((baseline[0], baseline[1] + 10, baseline[2], baseline[3]), 2, 3),
+        ((baseline[0], baseline[1], baseline[2], baseline[3]), DEFAULT_LATENCY, 12),
+        ((baseline[0] - 15, baseline[1], baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
+        ((baseline[0] - 10, baseline[1], baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
+        ((baseline[0] - 5, baseline[1], baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
+        ((baseline[0] + 5, baseline[1], baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
+        ((baseline[0] + 10, baseline[1], baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
+        ((baseline[0], baseline[1] - 10, baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
+        ((baseline[0], baseline[1] - 5, baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
+        ((baseline[0], baseline[1] + 0, baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
+        ((baseline[0], baseline[1] + 5, baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
+        ((baseline[0], baseline[1] + 10, baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
     ]
     sgstarts = [0]
     
@@ -329,16 +357,21 @@ def simple_test(baseline=[5, 0, 5, 0]):
         
         print 'Head block number:', head.number
         print 'Head block height:', head.height
-        print head.state
         # print validators[0].scores
         
         for i, ((s, l, c), pos) in enumerate(zip(strategy_groups, sgstarts)):
-            totrev = 0
+            totblks = 0
+            tottxs = 0
+            totskips = 0
             totcre = 0
             for j in range(pos, pos + c):
-                totrev += head.state.get(j, 0)
+                totblks += head.state.get('blockrewards:'+str(j), 0)
+                tottxs += head.state.get('txfees:'+str(j), 0)
+                totskips += head.state.get('skiprewards:'+str(j), 0)
                 totcre += validators[j].created
-            print 'Strategy group %d: average %d / %d / %d' % (i, totrev * 1.0 / c, totcre * 1.0 / c, (totrev * 2.0 - totcre) / c)
+            score1 = (totblks * 2.0 - totcre) / c
+            score2 = (totblks * 2.0 - totcre + tottxs / BLKTIME) / c
+            print 'Strategy group %d: average %d blocks in chain / %d txfees / %d skips / %d blocks created / %d score1 / %d score2' % (i, totblks * 1.0 / c, tottxs * 1.0 / c, totskips * 1.0 / c, totcre * 1.0 / c, score1, score2)
 
     report(validators)
 
