@@ -22,15 +22,15 @@ latency_sample = lambda L: int((random.expovariate(1) * ((L/1.33)**0.75))**1.33)
 # latency_sample = lambda L: random.randrange(L * 2)
 # latency = lambda: random.randrange(15) if random.randrange(10) else 47
 # Offline rate
-OFFLINE_RATE = 0.05
+OFFLINE_RATE = 0.23
 # Additional block reward for a skip block
 SKIP_REWARD = 0
 # Score contribution for a too-early block (1, 0 or -1)
-TOO_EARLY_SCORE = 0
+TOO_EARLY_SCORE = 1
 # Using GHOST?
 USING_GHOST = 0
 # Default latency
-DEFAULT_LATENCY = 3
+DEFAULT_LATENCY = 7.5
 
 BLANK_STATE = {'transactions': 0}
 
@@ -163,12 +163,12 @@ class Validator():
     def earliest_produce_time(self, parent, skips):
         return BLKTIME + (self.non_skip_produce_delay if not skips else 0) + \
             parent.height * BLKTIME + (parent.totskips + skips) * SKIPTIME + \
-            (skips if self.with_skip_produce_delay else 0)
+            (self.with_skip_produce_delay if skips else 0)
 
     def earliest_accept_time(self, parent, skips):
         return BLKTIME + (self.non_skip_accept_delay if not skips else 0) + \
             parent.height * BLKTIME + (parent.totskips + skips) * SKIPTIME + \
-            (skips if self.with_skip_accept_delay else 0)
+            (self.with_skip_accept_delay if skips else 0)
 
     def mine(self):
         # Is it time to produce a block?
@@ -330,17 +330,22 @@ def simple_test(baseline=[2, 0, 2, 0]):
     # Define the strategies of the validators
     strategy_groups = [
         # ((nonskip produce, nonskip accept, skip produce, skip accept) delays, network latency, number of nodes)
-        ((baseline[0], baseline[1], baseline[2], baseline[3]), DEFAULT_LATENCY, 12),
-        ((baseline[0] - 15, baseline[1], baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
-        ((baseline[0] - 10, baseline[1], baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
-        ((baseline[0] - 5, baseline[1], baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
-        ((baseline[0] + 5, baseline[1], baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
-        ((baseline[0] + 10, baseline[1], baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
-        ((baseline[0], baseline[1] - 10, baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
-        ((baseline[0], baseline[1] - 5, baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
-        ((baseline[0], baseline[1] + 0, baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
-        ((baseline[0], baseline[1] + 5, baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
-        ((baseline[0], baseline[1] + 10, baseline[2], baseline[3]), DEFAULT_LATENCY, 3),
+        ((baseline[0], baseline[1], baseline[2], baseline[3]), DEFAULT_LATENCY, 15),
+        ((baseline[0] - 0, baseline[1], baseline[2] - 80, baseline[3]), DEFAULT_LATENCY, 4),
+        ((baseline[0] - 0, baseline[1], baseline[2] - 60, baseline[3]), DEFAULT_LATENCY, 4),
+        ((baseline[0] - 0, baseline[1], baseline[2] - 40, baseline[3]), DEFAULT_LATENCY, 4),
+        ((baseline[0] - 0, baseline[1], baseline[2] - 20, baseline[3]), DEFAULT_LATENCY, 4),
+        # ((baseline[0] + 20, baseline[1], baseline[2] + 20, baseline[3]), DEFAULT_LATENCY, 3),
+        # ((baseline[0] + 40, baseline[1], baseline[2] + 40, baseline[3]), DEFAULT_LATENCY, 3),
+        ((baseline[0], baseline[1] - 0, baseline[2], baseline[3] - 80), DEFAULT_LATENCY, 3),
+        ((baseline[0], baseline[1] - 0, baseline[2], baseline[3] - 60), DEFAULT_LATENCY, 3),
+        ((baseline[0], baseline[1] - 0, baseline[2], baseline[3] - 40), DEFAULT_LATENCY, 3),
+        ((baseline[0], baseline[1] - 0, baseline[2], baseline[3] - 20), DEFAULT_LATENCY, 3),
+        ((baseline[0], baseline[1] + 0, baseline[2], baseline[3] + 0), DEFAULT_LATENCY, 3),
+        ((baseline[0], baseline[1] + 0, baseline[2], baseline[3] - 20), DEFAULT_LATENCY, 3),
+        ((baseline[0], baseline[1] + 0, baseline[2], baseline[3] + 40), DEFAULT_LATENCY, 3),
+        # ((baseline[0], baseline[1] + 40, baseline[2], baseline[3] + 40), DEFAULT_LATENCY, 3),
+        # ((baseline[0], baseline[1] + 80, baseline[2], baseline[3] + 80), DEFAULT_LATENCY, 3),
     ]
     sgstarts = [0]
     
