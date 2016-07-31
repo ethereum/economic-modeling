@@ -2,7 +2,8 @@ import networksim
 from casper import Validator
 from ethereum.parse_genesis_declaration import mk_basic_state
 from ethereum.config import Env
-from ethereum.casper_utils import casper_config, get_casper_code, get_casper_ct, RandaoManager, generate_validation_code
+from ethereum.casper_utils import casper_config, get_casper_code, get_rlp_decoder_code, \
+    get_casper_ct, RandaoManager, generate_validation_code, get_hash_without_ed_code
 from ethereum.utils import sha3, privtoaddr
 from ethereum.transactions import Transaction
 from ethereum.state_transition import apply_transaction
@@ -28,6 +29,8 @@ s.timestamp = 2
 s.prev_headers[0].difficulty = 1
 s.block_difficulty = 1
 s.set_code(casper_config['CASPER_ADDR'], get_casper_code())
+s.set_code(casper_config['RLP_DECODER_ADDR'], get_rlp_decoder_code())
+s.set_code(casper_config['HASH_WITHOUT_BLOOM_ADDR'], get_hash_without_ed_code())
 ct = get_casper_ct()
 # Add all validators
 for k, r, ds in zip(keys, randaos, deposit_sizes):
