@@ -1,5 +1,6 @@
 from ethereum.casper_utils import RandaoManager, get_skips_and_block_making_time, \
-    generate_validation_code, call_casper, make_block, check_skips, get_timestamp
+    generate_validation_code, call_casper, make_block, check_skips, get_timestamp, \
+    get_casper_ct
 from ethereum.utils import sha3, hash32, privtoaddr
 from ethereum.block import Block
 from ethereum.transactions import Transaction
@@ -10,6 +11,11 @@ import random
 
 EPOCH_LENGTH = 10000
 validatorSizes = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+CHECK_FOR_UNCLES_BACK = 8
+
+global_block_counter = 0
+
+casper_ct = get_casper_ct()
 
 class ChildRequest(rlp.Serializable):
     fields = [
@@ -26,13 +32,15 @@ class ChildRequest(rlp.Serializable):
 ids = []
 
 class Validator():
-    def __init__(self, genesis, key, network, env):
+    def __init__(self, genesis, key, network, env, time_offset=5):
         # Create a chain object
         self.chain = Chain(genesis, env=env)
         # Use the validator's time as the chain's time
         self.chain.time = lambda: self.get_timestamp()
         # My private key
         self.key = key
+        # My address
+        self.address = privtoaddr(key)
         # My randao
         self.randao = RandaoManager(sha3(self.key))
         # Pointer to the test p2p network
@@ -49,7 +57,7 @@ class Validator():
         # Parents that this validator has already built a block on
         self.used_parents = {}
         # This validator's clock offset (for testing purposes)
-        self.time_offset = random.randrange(5) - 2
+        self.time_offset = random.randrange(time_offset) - (time_offset // 2)
         # Give this validator a unique ID
         self.id = len(ids)
         ids.append(self.id)
@@ -71,6 +79,16 @@ class Validator():
         self.indices = None
         self.next_skip_count, self.next_skip_timestamp = 0, 0
         print 'Not in current validator set'
+
+    def get_uncles(self):
+        anc = self.chain.get_block(self.chain.get_blockhash_by_number(self.chain.state.block_number - CHECK_FOR_UNCLES_BACK))
+        if anc:
+            descendants = self.chain.get_descendants(anc)
+        else:
+            descendants = self.chain.get_descendants(self.chain.db.get('GENESIS_HASH'))
+        potential_uncles = [x for x in descendants if x not in self.chain and isinstance(x, Block)]
+        uncles = [x.header for x in potential_uncles if not call_casper(self.chain.state, 'isDunkleIncluded', [x.header.hash])]
+        return uncles
 
     def get_timestamp(self):
         return int(self.network.time * 0.01) + self.time_offset
@@ -114,15 +132,30 @@ class Validator():
                     return
                 self.used_parents[self.chain.head_hash] = True
                 # Simulated 15% chance of validator failure to make a block
-                if random.random() > 0.85:
+                if random.random() > 0.999:
                     print 'Simulating validator failure, block %d not created' % (self.chain.head.header.number + 1 if self.chain.head else 0)
                     return
                 # Make the block, make sure it's valid
+                pre_dunkle_count = call_casper(self.chain.state, 'getTotalDunklesIncluded', [])
+                dunkle_txs = []
+                for i, u in enumerate(self.get_uncles()[:4]):
+                    start_nonce = self.chain.state.get_nonce(self.address)
+                    print 'start_nonce', start_nonce
+                    txdata = casper_ct.encode('includeDunkle', [rlp.encode(u)])
+                    dunkle_txs.append(Transaction(start_nonce + i, 0, 650000, self.chain.config['CASPER_ADDR'], 0, txdata).sign(self.key))
+                for dtx in dunkle_txs[::-1]:
+                    self.chain.add_transaction(dtx, force=True)
                 blk = make_block(self.chain, self.key, self.randao, self.indices, self.next_skip_count)
-                print 'made block with timestamp', blk.timestamp
+                global global_block_counter
+                global_block_counter += 1
+                for dtx in dunkle_txs:
+                    assert dtx in blk.transactions, (dtx, blk.transactions)
+                print 'made block with timestamp %d and %d dunkles' % (blk.timestamp, len(dunkle_txs))
                 assert blk.timestamp >= self.next_skip_timestamp
                 assert self.chain.add_block(blk)
                 self.update_head()
+                post_dunkle_count = call_casper(self.chain.state, 'getTotalDunklesIncluded', [])
+                assert post_dunkle_count - pre_dunkle_count == len(dunkle_txs)
                 self.received_objects[blk.hash] = True
                 print 'Validator %d making block %d (%s)' % (self.id, blk.header.number, blk.header.hash[:8].encode('hex'))
                 self.network.broadcast(self, blk)

@@ -1,19 +1,21 @@
 import networksim
 from casper import Validator
+import casper
 from ethereum.parse_genesis_declaration import mk_basic_state
 from ethereum.config import Env
 from ethereum.casper_utils import casper_config, get_casper_code, get_rlp_decoder_code, \
-    get_casper_ct, RandaoManager, generate_validation_code, get_hash_without_ed_code
+    get_casper_ct, RandaoManager, generate_validation_code, get_hash_without_ed_code, \
+    call_casper
 from ethereum.utils import sha3, privtoaddr
 from ethereum.transactions import Transaction
 from ethereum.state_transition import apply_transaction
 
 from ethereum.slogging import LogRecorder, configure_logging, set_level
 # config_string = ':info,eth.vm.log:trace,eth.vm.op:trace,eth.vm.stack:trace,eth.vm.exit:trace,eth.pb.msg:trace,eth.pb.tx:debug'
-# config_string = ':info,eth.vm.log:trace'
-# configure_logging(config_string=config_string)
+config_string = ':info'  # ,eth.vm.log:trace'
+configure_logging(config_string=config_string)
 
-n = networksim.NetworkSimulator()
+n = networksim.NetworkSimulator(latency=125)
 n.time = 2
 print 'Generating keys'
 keys = [sha3(str(i)) for i in range(20)]
@@ -43,7 +45,7 @@ s.commit()
 g = s.to_snapshot()
 print 'Genesis state created'
 
-validators = [Validator(g, k, n, Env(config=casper_config)) for k in keys]
+validators = [Validator(g, k, n, Env(config=casper_config), time_offset=4) for k in keys]
 n.agents = validators
 n.generate_peers()
 
@@ -52,3 +54,5 @@ for i in range(100000):
     n.tick()
     if i % 100 == 0:
         print 'Validator heads:', [v.chain.head.header.number if v.chain.head else None for v in validators]
+        print 'Total blocks created:', casper.global_block_counter
+        print 'Dunkle count:', call_casper(validators[0].chain.state, 'getTotalDunklesIncluded', [])
