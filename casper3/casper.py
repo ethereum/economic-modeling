@@ -1,6 +1,6 @@
 from ethereum.casper_utils import RandaoManager, get_skips_and_block_making_time, \
     generate_validation_code, call_casper, make_block, check_skips, get_timestamp, \
-    get_casper_ct
+    get_casper_ct, validator_sizes
 from ethereum.utils import sha3, hash32, privtoaddr
 from ethereum.block import Block
 from ethereum.transactions import Transaction
@@ -10,7 +10,6 @@ import rlp
 import random
 
 EPOCH_LENGTH = 10000
-validatorSizes = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
 CHECK_FOR_UNCLES_BACK = 8
 
 global_block_counter = 0
@@ -65,7 +64,7 @@ class Validator():
         self.cached_head = self.chain.head_hash
 
     def find_my_indices(self):
-        for i in range(len(validatorSizes)):
+        for i in range(len(validator_sizes)):
             epoch = self.chain.state.block_number // EPOCH_LENGTH
             valcount = call_casper(self.chain.state, 'getHistoricalValidatorCount', [epoch, i])
             for j in range(valcount):
