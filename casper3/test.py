@@ -13,10 +13,10 @@ from ethereum.state_transition import apply_transaction
 
 from ethereum.slogging import LogRecorder, configure_logging, set_level
 # config_string = ':info,eth.vm.log:trace,eth.vm.op:trace,eth.vm.stack:trace,eth.vm.exit:trace,eth.pb.msg:trace,eth.pb.tx:debug'
-config_string = ':info'  # ,eth.vm.log:trace'
+config_string = ':info,eth.vm.log:trace'
 configure_logging(config_string=config_string)
 
-n = networksim.NetworkSimulator(latency=200)
+n = networksim.NetworkSimulator(latency=150)
 n.time = 2
 print 'Generating keys'
 keys = [sha3(str(i)) for i in range(20)]
@@ -37,10 +37,18 @@ validators = [Validator(g, k, n, Env(config=casper_config), time_offset=4) for k
 n.agents = validators
 n.generate_peers()
 
-for i in range(100000):
+for i in range(4100):
     # print 'ticking'
     n.tick()
     if i % 100 == 0:
+        print '%d ticks passed' % i
         print 'Validator heads:', [v.chain.head.header.number if v.chain.head else None for v in validators]
         print 'Total blocks created:', casper.global_block_counter
         print 'Dunkle count:', call_casper(validators[0].chain.state, 'getTotalDunklesIncluded', [])
+    if i == 2000:
+        print 'Withdrawing a few validators'
+        for v in validators[:5]:
+            v.withdraw()
+    if i == 4000:
+        for v in validators[:5]:
+            assert call_casper(v.chain.state, 'getEndEpoch', []) <= 2

@@ -1,7 +1,8 @@
 from ethereum.casper_utils import RandaoManager, get_skips_and_block_making_time, \
     generate_validation_code, call_casper, make_block, check_skips, get_timestamp, \
     get_casper_ct, validator_sizes
-from ethereum.utils import sha3, hash32, privtoaddr
+from ethereum.utils import sha3, hash32, privtoaddr, ecsign, zpad, encode_int32, \
+    big_endian_to_int
 from ethereum.block import Block
 from ethereum.transactions import Transaction
 from ethereum.chain import Chain
@@ -101,13 +102,14 @@ class Validator():
             return
         if isinstance(obj, Block):
             print 'Receiving block', obj
-            assert obj.hash not in self.chain, (self.received_objects, obj.hash, [x.hash for x in self.chain.get_chain()])
+            assert obj.hash not in self.chain
             block_success = self.chain.add_block(obj)
             self.network.broadcast(self, obj)
             self.network.broadcast(self, ChildRequest(obj.header.hash))
             self.update_head()
         elif isinstance(obj, Transaction):
-            self.chain.add_transaction(obj)
+            if self.chain.add_transaction(obj):
+                self.network.broadcast(self, obj)
         self.received_objects[obj.hash] = True
         for x in self.chain.get_chain():
             assert x.hash in self.received_objects
@@ -121,7 +123,6 @@ class Validator():
             t = self.get_timestamp()
             # Is it early enough to create the block?
             if t >= self.next_skip_timestamp and (not self.chain.head or t > self.chain.head.header.timestamp):
-                print 'creating', t, self.next_skip_timestamp
                 # Wrong validator; in this case, just wait for the next skip count
                 if not check_skips(self.chain, self.indices, self.next_skip_count):
                     self.next_skip_count += 1
@@ -139,7 +140,6 @@ class Validator():
                 dunkle_txs = []
                 for i, u in enumerate(self.get_uncles()[:4]):
                     start_nonce = self.chain.state.get_nonce(self.address)
-                    print 'start_nonce', start_nonce
                     txdata = casper_ct.encode('includeDunkle', [rlp.encode(u)])
                     dunkle_txs.append(Transaction(start_nonce + i, 0, 650000, self.chain.config['CASPER_ADDR'], 0, txdata).sign(self.key))
                 for dtx in dunkle_txs[::-1]:
@@ -175,3 +175,13 @@ class Validator():
             self.next_skip_count = 0
             self.next_skip_timestamp = get_timestamp(self.chain, self.next_skip_count)
         print 'Head changed: %s, will attempt creating a block at %d' % (self.chain.head_hash.encode('hex'), self.next_skip_timestamp)
+
+    def withdraw(self, gasprice=20 * 10**9):
+        h = sha3(b'withdrawwithdrawwithdrawwithdraw')
+        v, r, s = ecsign(h, self.key)
+        sigdata = encode_int32(v) + encode_int32(r) + encode_int32(s)
+        txdata = casper_ct.encode('startWithdrawal', [self.indices[0], self.indices[1], sigdata])
+        tx = Transaction(self.chain.state.get_nonce(self.address), gasprice, 650000, self.chain.config['CASPER_ADDR'], 0, txdata).sign(self.key)
+        self.chain.add_transaction(tx)
+        self.network.broadcast(self, tx)
+        print 'Withdrawing!'
