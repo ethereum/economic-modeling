@@ -29,15 +29,17 @@ s = make_casper_genesis(validators=[(generate_validation_code(privtoaddr(k)), ds
                                     for k, ds, r in zip(keys, deposit_sizes, randaos)],
                         alloc={privtoaddr(k): {'balance': 10**18} for k in keys},
                         timestamp=2,
-                        epoch_length=100)
+                        epoch_length=40)
 g = s.to_snapshot()
 print 'Genesis state created'
 
 validators = [Validator(g, k, n, Env(config=casper_config), time_offset=4) for k in keys]
 n.agents = validators
 n.generate_peers()
+lowest_shared_height = -1
+made_101_check = 0
 
-for i in range(4100):
+for i in range(100000):
     # print 'ticking'
     n.tick()
     if i % 100 == 0:
@@ -45,10 +47,23 @@ for i in range(4100):
         print 'Validator heads:', [v.chain.head.header.number if v.chain.head else None for v in validators]
         print 'Total blocks created:', casper.global_block_counter
         print 'Dunkle count:', call_casper(validators[0].chain.state, 'getTotalDunklesIncluded', [])
+        lowest_shared_height = min([v.chain.head.header.number if v.chain.head else -1 for v in validators])
+        if lowest_shared_height >= 101 and not made_101_check:
+            made_101_check = True
+            print 'Checking that withdrawn validators are inactive'
+            assert len([v for v in validators if v.active]) == len(validators) - 5, len([v for v in validators if v.active])
+            print 'Check successful'
+            break
+    if i == 1:
+        print 'Checking that all validators are active'
+        assert len([v for v in validators if v.active]) == len(validators)
+        print 'Check successful'
     if i == 2000:
         print 'Withdrawing a few validators'
         for v in validators[:5]:
             v.withdraw()
     if i == 4000:
+        print 'Checking that validators have withdrawn'
         for v in validators[:5]:
             assert call_casper(v.chain.state, 'getEndEpoch', []) <= 2
+        print 'Check successful'

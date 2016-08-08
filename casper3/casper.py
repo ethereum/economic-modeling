@@ -10,7 +10,6 @@ import networksim
 import rlp
 import random
 
-EPOCH_LENGTH = 10000
 CHECK_FOR_UNCLES_BACK = 8
 
 global_block_counter = 0
@@ -52,31 +51,52 @@ class Validator():
         self.next_skip_timestamp = 0
         # This validator's indices in the state
         self.indices = None
+        # Is this validator active?
+        self.active = False
         # Code that verifies signatures from this validator
         self.validation_code = generate_validation_code(privtoaddr(key))
         # Parents that this validator has already built a block on
         self.used_parents = {}
         # This validator's clock offset (for testing purposes)
         self.time_offset = random.randrange(time_offset) - (time_offset // 2)
+        # Determine the epoch length
+        self.epoch_length = self.call_casper('getEpochLength')
         # Give this validator a unique ID
         self.id = len(ids)
         ids.append(self.id)
         self.find_my_indices()
         self.cached_head = self.chain.head_hash
 
+    def call_casper(self, fun, args=[]):
+        return call_casper(self.chain.state, fun, args)
+
     def find_my_indices(self):
+        epoch = self.chain.state.block_number // self.epoch_length
+        print 'Finding indices for epoch %d' % epoch, self.call_casper('getEpoch')
         for i in range(len(validator_sizes)):
-            epoch = self.chain.state.block_number // EPOCH_LENGTH
-            valcount = call_casper(self.chain.state, 'getHistoricalValidatorCount', [epoch, i])
+            valcount = self.call_casper('getHistoricalValidatorCount', [epoch, i])
+            print i, valcount, self.call_casper('getHistoricalValidatorCount', [0, i])
             for j in range(valcount):
-                valcode = call_casper(self.chain.state, 'getValidationCode', [i, j])
+                valcode = self.call_casper('getValidationCode', [i, j])
+                print (valcode, self.validation_code)
                 if valcode == self.validation_code:
                     self.indices = i, j
-                    self.next_skip_count = 0
-                    self.next_skip_timestamp = get_timestamp(self.chain, self.next_skip_count)
-                    print 'In current validator set at (%d, %d)' % (i, j)
-                    return
+                    start = self.call_casper('getStartEpoch', [i, j])
+                    end = self.call_casper('getEndEpoch', [i, j])
+                    if start <= epoch < end:
+                        self.active = True
+                        self.next_skip_count = 0
+                        self.next_skip_timestamp = get_timestamp(self.chain, self.next_skip_count)
+                        print 'In current validator set at (%d, %d)' % (i, j)
+                        return
+                    else:
+                        self.indices = None
+                        self.active = False
+                        self.next_skip_count, self.next_skip_timestamp = 0, 0
+                        print 'Registered at (%d, %d) but not in current set' % (i, j)
+                        return
         self.indices = None
+        self.active = False
         self.next_skip_count, self.next_skip_timestamp = 0, 0
         print 'Not in current validator set'
 
@@ -127,8 +147,8 @@ class Validator():
                 if not check_skips(self.chain, self.indices, self.next_skip_count):
                     self.next_skip_count += 1
                     self.next_skip_timestamp = get_timestamp(self.chain, self.next_skip_count)
-                    print 'Incrementing proposed timestamp for block %d to %d' % \
-                        (self.chain.head.header.number + 1 if self.chain.head else 0, self.next_skip_timestamp)
+                    # print 'Incrementing proposed timestamp for block %d to %d' % \
+                    #     (self.chain.head.header.number + 1 if self.chain.head else 0, self.next_skip_timestamp)
                     return
                 self.used_parents[self.chain.head_hash] = True
                 # Simulated 15% chance of validator failure to make a block
@@ -169,7 +189,7 @@ class Validator():
         if self.cached_head == self.chain.head_hash:
             return
         self.cached_head = self.chain.head_hash
-        if self.chain.state.block_number % EPOCH_LENGTH == 0:
+        if self.chain.state.block_number % self.epoch_length == 0:
             self.find_my_indices()
         if self.indices:
             self.next_skip_count = 0
