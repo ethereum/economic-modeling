@@ -1,49 +1,80 @@
 import random
 import sys
 
-def test_strat(strat, hashpower, gamma, reward, fees, rounds=25000):
+def test_strat(strat, hashpower, gamma, reward, fees, uncle_rewards=1, uncle_coeff=0, rounds=25000):
+    # Block reward for attacker
     me_reward = 0
+    # Block reward for others
     them_reward = 0
+    # Fees for the attacker
+    me_fees = 0
+    # Fees for others
+    them_fees = 0
+    # Blocks in current private chain
     me_blocks = 0
+    # Blocks in current public chain
     them_blocks = 0
+    # Time elapsed since last chain merging
     time_elapsed = 0
-    uncles_produced = 0
-    uncle_rewards = 0
+    # Divisor for block rewards (diff adjustment)
+    divisor = 0
+    # Simulate the system
     for i in range(rounds):
+        # Attacker makes a block
         if random.random() < hashpower:
             me_blocks += 1
             last_is_me = 1
+        # Honest nodes make a block
         else:
             them_blocks += 1
             last_is_me = 0
         time_elapsed += random.expovariate(1)
         # "Adopt" or "override"
         if me_blocks >= len(strat) or them_blocks >= len(strat[me_blocks]) or strat[me_blocks][them_blocks] == 1:
+            # Override
             if me_blocks > them_blocks or (me_blocks == them_blocks and random.random() < gamma):
-                me_reward += me_blocks * reward + time_elapsed * fees
-                if me_blocks < 7:
-                    them_reward += them_blocks * (0.875 - 0.125 * me_blocks)
+                me_reward += me_blocks * reward
+                me_fees += time_elapsed * fees
+                divisor += me_blocks
+                # Add uncles
+                while me_blocks < 7 and them_blocks > 0:
+                    r = min(them_blocks, 2) * (0.875 - 0.125 * me_blocks) * uncle_rewards
+                    divisor += min(them_blocks, 2) * uncle_coeff
+                    them_reward = them_reward + r
+                    them_blocks, me_blocks = them_blocks - 2, me_blocks + 1
+            # Adopt
             else:
-                them_reward += them_blocks * reward + time_elapsed * fees
-                if them_blocks < 7:
-                    me_reward += me_blocks * (0.875 - 0.125 * them_blocks)
+                them_reward += them_blocks * reward
+                them_fees += time_elapsed * fees
+                divisor += them_blocks
+                # Add uncles
+                while them_blocks < 7 and me_blocks > 0:
+                    r = min(me_blocks, 2) * (0.875 - 0.125 * them_blocks) * uncle_rewards
+                    divisor += min(me_blocks, 2) * uncle_coeff
+                    me_reward = me_reward + r
+                    me_blocks, them_blocks = me_blocks - 2, them_blocks + 1
             me_blocks = 0
             them_blocks = 0
             time_elapsed = 0
-        # "Match"
+        # Match
         elif strat[me_blocks][them_blocks] == 2 and not last_is_me:
             if random.random() < gamma:
                 me_reward += me_blocks * reward + time_elapsed * fees
+                divisor += me_blocks
                 me_blocks = 0
                 them_blocks = 0
                 time_elapsed = 0
-                if them_blocks < 7:
-                    them_reward += them_blocks * (0.875 - 0.125 * me_blocks)
-    return me_reward, them_reward
+                # Add uncles
+                while me_blocks < 7 and them_blocks > 0:
+                    r = min(them_blocks, 2) * (0.875 - 0.125 * me_blocks)
+                    divisor += min(them_blocks, 2) * uncle_coeff
+                    them_reward = them_reward + r
+                    them_blocks, me_blocks = them_blocks - 2, me_blocks + 1
+    return me_reward / divisor + me_fees / rounds, them_reward / divisor + them_fees / rounds
 
 # A 20x20 array meaning "what to do if I made i blocks and the network
 # made j blocks?". 1 = publish, 0 = do nothing.
-def gen_selfish_mining_strat(optimistic=True):
+def gen_selfish_mining_strat():
     o = [([0] * 20) for i in range(20)]
     for me in range(20):
         for them in range(20):
@@ -61,15 +92,13 @@ def gen_selfish_mining_strat(optimistic=True):
     return o
 
 
-dic = {"rewards": 1, "fees": 0, "gamma": 0.5, "optimistic": False}
+dic = {"rewards": 1, "fees": 0, "gamma": 0.5, "uncle_coeff": 0, "uncle_rewards": 0}
 for a in sys.argv[1:]:
     param, val = a[:a.index('=')], a[a.index('=')+1:]
-    if param == 'optimistic':
-        dic[param] = (val in ('true', 'True', '1'))
-    else:
-        dic[param] = float(val)
+    dic[param] = float(val)
 print dic
-s = gen_selfish_mining_strat(dic["optimistic"])
+s = gen_selfish_mining_strat()
 for i in range(1, 50):
-    x, y = test_strat(s, i * 0.01, dic["gamma"], dic["rewards"], dic["fees"], rounds=200000)
-    print '%d%% hashpower, %f%% of rewards' % (i, x * 100.0 / (x + y))
+    x, y = test_strat(s, i * 0.01, dic["gamma"], dic["rewards"], dic["fees"], dic["uncle_rewards"], dic["uncle_coeff"], rounds=200000)
+    print '%d%% hashpower, %f%% of rewards, (%f attacker, %f honest)' % \
+        (i, x * 100.0 / (x + y), x * 100.0 / i, y * 100.0 / (100-i))
